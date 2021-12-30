@@ -1,0 +1,334 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Update the apt package index
+      tags: experiment
+      become: yes
+      apt:
+        name: "*"
+        state: latest
+        update_cache: yes
+        force_apt_get: yes
+
+    - name: install required modules
+      tags: experiment
+      become: true
+      apt:
+        name: ['git', 'apt-transport-https', 'ca-certificates', 'wget', 'software-properties-common', 'gnupg2', 'curl', 'make', 'gcc', 'autoconf', 'automake', 'libtool', 'g++', 'protobuf-compiler', 'python3-pip']
+
+    - name: Install Pillow for Python3
+      tags: experiment
+      pip:
+        name: Pillow
+        executable: pip3
+
+    - name: Install TensorFlow for Python3
+      tags: experiment
+      pip:
+        name: TensorFlow
+        executable: pip3
+
+    - name: Install pycocotools for Python3
+      tags: experiment
+      pip:
+        name: pycocotools
+        executable: pip3
+
+    - name: Install pandas for Python3
+      tags: experiment
+      pip:
+        name: pandas
+        executable: pip3
+
+    - name: enable sudoless invocation for perf
+      tags: experiment
+      become: true
+      shell: |
+        sh -c echo -1 >/proc/sys/kernel/perf_event_paranoid
+        sysctl -w kernel.perf_event_paranoid=-1
+      
+    - name: add apt signing key from official docker repo
+      tags: experiment
+      become: true
+      apt_key:
+        url: https://download.docker.com/linux/debian/gpg
+        state: present
+
+    - name: add docker official repository for Debian Stretch
+      tags: experiment
+      become: true
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/debian stretch stable
+        state: present
+
+    - name: Index new repo into the cache
+      tags: experiment
+      become: yes
+      apt:
+        name: "*"
+        state: latest
+        update_cache: yes
+        force_apt_get: yes
+
+    - name: install docker
+      tags: experiment
+      become: true
+      apt:
+        name: "docker-ce"
+        state: latest
+
+    - name: ensure docker deamon is running
+      tags: experiment
+      become: yes
+      service:
+        name: docker
+        state: started
+
+    - name: add user to docker group
+      tags: experiment
+      become: yes
+      shell: |
+        groupadd docker
+        usermod -aG docker {{ user }}
+
+    - name: define variable for nvidia-docker
+      tags: experiment
+      stat:
+        path: ./nvidia-docker
+      register: nvidiadocker
+
+    - name: clone and install nvidia-docker
+      tags: experiment
+      when: not nvidiadocker.stat.exists
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        git clone https://github.com/NVIDIA/nvidia-docker.git
+        cd nvidia-docker
+        make
+
+    - name: define variable for DeepLearningExamples
+      tags: experiment
+      stat:
+        path: ./DeepLearningExamples
+      register: deep_learning_examples
+
+    - name: clone repo DeepLearningExamples
+      tags: experiment
+      when: not deep_learning_examples.stat.exists
+      become: true
+      become_user: "{{ user }}"
+      shell: git clone https://github.com/NVIDIA/DeepLearningExamples.git
+
+    # Build and configure Transformer-XL (Pytroch)
+    - name: download data-set and build docker image for Pytorch's Transformer-XL
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/pytorch_transformer_to_wt103_base.yml DeepLearningExamples/PyTorch/LanguageModeling/Transformer-XL/pytorch/wt103_base.yaml
+        cd DeepLearningExamples/PyTorch/LanguageModeling/Transformer-XL
+        mkdir data || echo Already exists
+        cd data
+        wget --continue https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip
+        unzip -q wikitext-103-v1.zip
+        cd wikitext-103
+        mv wiki.train.tokens train.txt
+        mv wiki.valid.tokens valid.txt
+        mv wiki.test.tokens test.txt
+        cd ../..
+        rm data/wikitext-103-v1.zip
+      register: transformer_pytorch_output
+
+    - debug:
+        msg: "{{ transformer_pytorch_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build, configure, and generate train data-set corpuse.json for Transformer-XL (Tensorflow)
+    - name: download data-set and build docker image for TensorFlow's Transformer-XL
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/tensorflow_transformer_to_run_wt103_base.sh DeepLearningExamples/TensorFlow/LanguageModeling/Transformer-XL/tf/run_wt103_base.sh
+        cd DeepLearningExamples/TensorFlow/LanguageModeling/Transformer-XL
+        mkdir data || echo Already exist
+        cd data
+        wget --continue https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip
+        unzip -q wikitext-103-v1.zip
+        cd wikitext-103
+        mv wiki.train.tokens train.txt
+        mv wiki.valid.tokens valid.txt
+        mv wiki.test.tokens test.txt
+        cd ../..
+        rm data/wikitext-103-v1.zip
+        bash tf/scripts/docker/build.sh
+        docker run --tty --rm --gpus 1 --init --network=host  --ipc=host -v $PWD:/workspace/transformer-xl transformer-xl bash run_wt103_base.sh train_data --batch_chunk 32 --train_batch_size 16
+      register: transformer_tensorflow_output
+
+    - debug:
+        msg: "{{ transformer_tensorflow_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build and configure GNMT (Pytroch)
+    - name: download data-set and build docker image for Pytorch's GNMT
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/pytorch_gnmt_to_be_renamed_as_train.py DeepLearningExamples/PyTorch/Translation/GNMT/train.py
+        cd DeepLearningExamples/PyTorch/Translation/GNMT
+        bash scripts/docker/build.sh
+        docker run \
+          --gpus 1 \
+          --init --tty --rm \
+          --network=host \
+          --ipc=host \
+          -v $PWD:/workspace/gnmt/ \
+          gnmt bash scripts/wmt16_en_de.sh \
+      register: gnmt_tensorflow_output
+
+    - debug:
+        msg: "{{gnmt_tensorflow_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build and configure NCF (Pytroch)
+    - name: download data-set and build docker image for Pytorch's NCF
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/pytorch_ncf_to_be_renamed_as_ncf.py DeepLearningExamples/PyTorch/Recommendation/NCF/ncf.py 
+        cd DeepLearningExamples/PyTorch/Recommendation/NCF
+        rm -rf data || echo data dir not found
+        mkdir data
+        curl http://files.grouplens.org/datasets/movielens/ml-20m.zip --output ./data/ml-20m.zip && ./prepare_dataset.sh ml-20m data
+      register: ncf_pytorch_output
+
+    - debug:
+        msg: "{{ ncf_pytorch_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build and configure NCF (TensorFlow)
+    - name: download data-set and build docker image for TensorFlow's NCF
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/tensorflow_ncf_to_be_renamed_as_ncf.py DeepLearningExamples/TensorFlow/Recommendation/NCF/ncf.py 
+        cd DeepLearningExamples/TensorFlow/Recommendation/NCF
+        rm -rf data || echo data dir not ounf
+        mkdir data
+        curl http://files.grouplens.org/datasets/movielens/ml-20m.zip --output ./data/ml-20m.zip && ./prepare_dataset.sh ml-20m data
+      register: ncf_tensorflow_output
+
+    - debug:
+        msg: "{{ ncf_tensorflow_output.stdout_lines|list }}"
+      tags: experiment
+   
+    # Build and configure SSD (PyTorch) 
+    - name: download dataset and build docker image for PyTorch's SSD
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/pytorch_ssd_SSD300_FP16_1GPU.sh DeepLearningExamples/PyTorch/Detection/SSD/examples/SSD300_FP16_1GPU.sh
+        cd DeepLearningExamples/PyTorch/Detection/SSD
+        mkdir coco2017 || echo Already exists
+        bash download_dataset.sh ./coco2017
+      register: ssd_pytorch_output
+
+    - debug:
+        msg: "{{ ssd_pytorch_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build and configure SSD (TensorFlow) 
+    - name: download dataset and build docker image for TensorFlows's SSD
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/tensorflow_ssd_ssd320_full_1gpus.config DeepLearningExamples/TensorFlow/Detection/SSD/configs/ssd320_full_1gpus.config
+        cp configs/tensorflow_ssd_SSD320_FP16_1GPU.sh DeepLearningExamples/TensorFlow/Detection/SSD/examples/SSD320_FP16_1GPU.sh
+        cd DeepLearningExamples/TensorFlow/Detection/SSD
+        rm -rf coco2017 checkpoints || echo dirs not found
+        mkdir coco2017 checkpoints
+        sed -i 's/COPY\ qa\/\ qa\///g' Dockerfile
+        docker build . -t nvidia_ssd
+        bash download_all.sh nvidia_ssd $PWD/coco2017 $PWD/checkpoints    
+      register: ssd_tensorflow_output
+
+    - debug:
+        msg: "{{ ssd_tensorflow_output.stdout_lines|list }}"
+      tags: experiment
+    
+    # Build and configure MaskRCNN (PyTorch) 
+    - name: download dataset and build docker image for PyTorch's MaskRCNN
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/pytorch_mask_r_cnn_e2e_mask_rcnn_R_50_FPN_1x_1GPU.yaml DeepLearningExamples/PyTorch/Segmentation/MaskRCNN/pytorch/configs
+        cp configs/pytorch_mask_r_cnn_paths_catalog.py DeepLearningExamples/PyTorch/Segmentation/MaskRCNN/pytorch/maskrcnn_benchmark/config/paths_catalog.py
+        cd DeepLearningExamples/PyTorch/Segmentation/MaskRCNN
+        cp -r ../../Detection/SSD/coco2017 ./data
+      register: maskrcnn_pytorch_output
+
+    - debug:
+        msg: "{{ maskrcnn_pytorch_output.stdout_lines|list }}"
+      tags: experiment
+        
+    # Build and configure MaskRCNN (TensorFlow) 
+    - name: download dataset and build docker image for TensorFlows's MaskRCNN
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cd DeepLearningExamples/TensorFlow2/Segmentation/MaskRCNN
+        cd dataset
+        sed -i 's/python\ \$SCRIPT_DIR/python3\ \$SCRIPT_DIR/g' download_and_preprocess_coco.sh
+        bash download_and_preprocess_coco.sh ./data
+        cd ..
+        python scripts/download_weights.py --save_dir=./weights
+      register: maskrcnn_tensorflow_output
+
+    - debug:
+        msg: "{{ maskrcnn_tensorflow_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build and configure ResNet50 (PyTorch) 
+    - name: download dataset and build docker image for PyTorch's ResNet50
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/pytorch_rn50_DGX1V_resnet50_AMP_90E.sh DeepLearningExamples/PyTorch/Classification/ConvNets/resnet50v1.5/training/AMP/DGX1V_resnet50_AMP_90E.sh
+        cd DeepLearningExamples/PyTorch/Classification/ConvNets
+        cp -r ../../Segmentation/MaskRCNN/download_dataset.sh ./
+        bash download_dataset.sh coco2014
+      register: rn_pytorch_output
+
+    - debug:
+        msg: "{{ rn_pytorch_output.stdout_lines|list }}"
+      tags: experiment
+
+    # Build and configure ResNet50 (TensorFlow) 
+    - name: download dataset and build docker image for TensorFlow's ResNet50
+      tags: experiment
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        cp configs/tensorflow_rn50_DGX1_RN50_AMP_90E.sh DeepLearningExamples/TensorFlow/Classification/ConvNets/resnet50v1.5/training/DGX1_RN50_AMP_90E.sh 
+        cd DeepLearningExamples/TensorFlow/Classification/ConvNets
+        cp -r ../../../TensorFlow2/Segmentation/MaskRCNN/dataset ./
+        cd dataset
+        rm -rf data tf-models
+        sed 's/2017/2014/g' download_and_preprocess_coco.sh 
+        bash download_and_preprocess_coco.sh ./data
+      register: rn_tensorflow_output
+
+    - debug:
+        msg: "{{ rn_tensorflow_output.stdout_lines|list }}"
+      tags: experiment
