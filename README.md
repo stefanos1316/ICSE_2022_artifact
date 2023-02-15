@@ -3,9 +3,15 @@ This is a framework to faciliate the collection of energy and run-time performan
 for the DeepLearningExamples repository.
 At the moment, it can collect the energy and run-time perfomrance of six different DL models.
 
-# Prerequisite
+# Prerequisites
 - Ubuntu or Debian distro (we have tested it on Debian 10.04).
 - GPU with at least 8 GiB of memory
+
+# Execution environment
+- We used NVIDIA Quadro P4000 GPU.
+- The GPU was installed on a server equipped with two 6th generation Intel Xeon Gold 6154 CPU with 72 logical cores and 96 GB of main memory.
+- We used Ubuntu 18.04 and Cuda version 11.2.
+- The scripts were written using Python 3.7.
 
 # Content
 - `tools/compile_results.sh:` a shell script to collect the mean values of our tests, the results directory is required as a command line argument (for training or inference)
